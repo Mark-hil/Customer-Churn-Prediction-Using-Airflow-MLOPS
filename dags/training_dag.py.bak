@@ -1,0 +1,387 @@
+"""Airflow DAG for automated daily training & validation.
+
+This mirrors the Prefect `training_flow.py` but uses Airflow 2.x primitives.
+Place this file inside your `$AIRFLOW_HOME/dags` folder or add the current
+repository path to `AIRFLOW__CORE__DAGS_FOLDER`.
+
+Schedule: daily at 02:00 UTC.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+sys.path.append('/opt/airflow') 
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Optional
+
+import joblib
+import mlflow
+import numpy as np
+import pandas as pd
+from airflow import DAG
+from airflow.models.xcom_arg import XComArg
+from airflow.operators.python import PythonOperator
+from loguru import logger
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    confusion_matrix,
+    classification_report,
+)
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+
+# Import MLflow utilities
+from pipelines.mlflow_utils import setup_mlflow, log_model_metadata, get_feature_importance
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parents[2]
+RAW_DATA_PATH = BASE_DIR / "data/raw/WA_Fn-UseC_-Telco-Customer-Churn.csv"
+PROCESSED_DIR = BASE_DIR / "data/processed"
+MODEL_REGISTRY = BASE_DIR / "models"
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_REGISTRY.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# HELPERS (re-usable across tasks)
+# ---------------------------------------------------------------------------
+
+def _validate_data(df: pd.DataFrame) -> None:
+    expected_cols = {
+        "customerID",
+        "gender",
+        "SeniorCitizen",
+        "Partner",
+        "Dependents",
+        "tenure",
+        "PhoneService",
+        "MultipleLines",
+        "InternetService",
+        "OnlineSecurity",
+        "OnlineBackup",
+        "DeviceProtection",
+        "TechSupport",
+        "StreamingTV",
+        "StreamingMovies",
+        "Contract",
+        "PaperlessBilling",
+        "PaymentMethod",
+        "MonthlyCharges",
+        "TotalCharges",
+        "Churn",
+    }
+    missing = expected_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+    if df.isna().sum().sum() > 0:
+        logger.warning("⚠️ Raw data contains NaNs – handled in preprocessing.")
+
+
+def _preprocess(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    df = df.drop(columns=["customerID"])
+    df["TotalCharges"] = pd.to_numeric(df["TotalCharges"], errors="coerce").fillna(0)
+    y = df["Churn"].map({"Yes": 1, "No": 0}).values
+    X = df.drop(columns=["Churn"])
+    cat_cols = X.select_dtypes("object").columns.tolist()
+    num_cols = X.select_dtypes(include=["int64", "float64"]).columns.tolist()
+    preprocessor: ColumnTransformer = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(handle_unknown="ignore", sparse=False), cat_cols),
+            ("num", MinMaxScaler(), num_cols),
+        ]
+    )
+    X_processed = preprocessor.fit_transform(X)
+    feature_names = (
+        preprocessor.named_transformers_["cat"].get_feature_names_out(cat_cols).tolist()
+        + num_cols
+    )
+    return X_processed, y, feature_names
+
+
+def _train_model(X_train: np.ndarray, y_train: np.ndarray, model_params: Optional[dict] = None) -> LogisticRegression:
+    """Train a model with optional hyperparameters.
+    
+    Args:
+        X_train: Training features
+        y_train: Training labels
+        model_params: Dictionary of model parameters
+        
+    Returns:
+        Trained model
+    """
+    params = {
+        'max_iter': 1000,
+        'solver': 'lbfgs',
+        'random_state': 42,
+        **(model_params or {})
+    }
+    
+    model = LogisticRegression(**params)
+    model.fit(X_train, y_train)
+    return model
+
+
+def _evaluate(model: LogisticRegression, X_val: np.ndarray, y_val: np.ndarray) -> Dict[str, Any]:
+    proba = model.predict_proba(X_val)[:, 1]
+    preds = (proba > 0.5).astype(int)
+    return {
+        "accuracy": accuracy_score(y_val, preds),
+        "precision": precision_score(y_val, preds),
+        "recall": recall_score(y_val, preds),
+        "f1": f1_score(y_val, preds),
+        "roc_auc": roc_auc_score(y_val, proba),
+    }
+
+
+def _persist(model: LogisticRegression, metrics: Dict[str, Any], feature_names: List[str], data_hash: str, duration: float):
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    model_name = f"logreg_{timestamp}.pkl"
+    joblib.dump(model, MODEL_REGISTRY / model_name)
+
+    record = {
+        "model_file": model_name,
+        "created_at": timestamp,
+        "data_hash": data_hash,
+        "metrics": metrics,
+        "features": feature_names,
+        "model_type": "LogisticRegression",
+        "training_time_sec": duration,
+    }
+    with open(MODEL_REGISTRY / "metadata.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    logger.info("Model and metadata saved for {}", model_name)
+
+
+# ---------------------------------------------------------------------------
+# DAG DEFINITION
+# ---------------------------------------------------------------------------
+
+def load_data(**context):
+    logger.info("Loading data from {}", RAW_DATA_PATH)
+    df = pd.read_csv(RAW_DATA_PATH)
+    context["ti"].xcom_push(key="raw_df", value=df)
+
+
+def validate_data(**context):
+    df = context["ti"].xcom_pull(key="raw_df", task_ids="load_data")
+    _validate_data(df)
+
+
+def preprocess(**context):
+    df = context["ti"].xcom_pull(key="raw_df", task_ids="load_data")
+    X, y, feature_names = _preprocess(df)
+    context["ti"].xcom_push(key="X", value=X)
+    context["ti"].xcom_push(key="y", value=y)
+    context["ti"].xcom_push(key="feature_names", value=feature_names)
+
+
+def split(**context):
+    X = context["ti"].xcom_pull(key="X", task_ids="preprocess")
+    y = context["ti"].xcom_pull(key="y", task_ids="preprocess")
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    context["ti"].xcom_push(key="X_train", value=X_train)
+    context["ti"].xcom_push(key="X_val", value=X_val)
+    context["ti"].xcom_push(key="y_train", value=y_train)
+    context["ti"].xcom_push(key="y_val", value=y_val)
+
+
+def train(**context):
+    """Train the model and log to MLflow."""
+    # Get data from previous tasks
+    X_train = context["ti"].xcom_pull(key="X_train", task_ids="split")
+    y_train = context["ti"].xcom_pull(key="y_train", task_ids="split")
+    feature_names = context["ti"].xcom_pull(key="feature_names", task_ids="preprocess")
+    
+    # Initialize MLflow
+    setup_mlflow()
+    
+    # Define model parameters
+    model_params = {
+        'C': 1.0,
+        'class_weight': 'balanced',
+        'max_iter': 1000,
+        'solver': 'lbfgs',
+        'random_state': 42
+    }
+    
+    # Train model
+    start_time = time.time()
+    model = _train_model(X_train, y_train, model_params)
+    training_time = time.time() - start_time
+    
+    # Get feature importance
+    feature_importance = get_feature_importance(model, feature_names)
+    
+    # Push to XCom for downstream tasks
+    context["ti"].xcom_push(key="model", value=model)
+    context["ti"].xcom_push(key="model_params", value=model_params)
+    context["ti"].xcom_push(key="feature_importance", value=feature_importance)
+    context["ti"].xcom_push(key="training_time", value=training_time)
+
+
+def evaluate(**context):
+    """Evaluate the model and log metrics to MLflow."""
+    # Get data from previous tasks
+    model = context["ti"].xcom_pull(key="model", task_ids="train")
+    X_val = context["ti"].xcom_pull(key="X_val", task_ids="split")
+    y_val = context["ti"].xcom_pull(key="y_val", task_ids="split")
+    feature_importance = context["ti"].xcom_pull(key="feature_importance", task_ids="train")
+    model_params = context["ti"].xcom_pull(key="model_params", task_ids="train")
+    training_time = context["ti"].xcom_pull(key="training_time", task_ids="train")
+    
+    # Get predictions and metrics
+    proba = model.predict_proba(X_val)[:, 1]
+    preds = (proba > 0.5).astype(int)
+    
+    # Calculate metrics
+    metrics = {
+        'accuracy': accuracy_score(y_val, preds),
+        'precision': precision_score(y_val, preds, zero_division=0),
+        'recall': recall_score(y_val, preds, zero_division=0),
+        'f1': f1_score(y_val, preds, zero_division=0),
+        'roc_auc': roc_auc_score(y_val, proba),
+    }
+    
+    # Log to MLflow
+    with mlflow.start_run():
+        # Log parameters
+        mlflow.log_params(model_params)
+        
+        # Log metrics
+        mlflow.log_metrics(metrics)
+        
+        # Log model
+        mlflow.sklearn.log_model(
+            sk_model=model,
+            artifact_path="model",
+            registered_model_name="telco-churn-lr"
+        )
+        
+        # Log feature importance if available
+        if feature_importance:
+            importance_path = "feature_importance.json"
+            with open(importance_path, "w") as f:
+                json.dump(feature_importance, f)
+            mlflow.log_artifact(importance_path)
+        
+        # Log additional metadata
+        mlflow.set_tag("model_type", model.__class__.__name__)
+        mlflow.set_tag("training_time_seconds", training_time)
+        
+        # Log confusion matrix as artifact
+        cm = confusion_matrix(y_val, preds)
+        cm_path = "confusion_matrix.png"
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        plt.title('Confusion Matrix')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.savefig(cm_path)
+        plt.close()
+        mlflow.log_artifact(cm_path)
+        
+        # Log classification report
+        report = classification_report(y_val, preds, output_dict=True)
+        report_path = "classification_report.json"
+        with open(report_path, 'w') as f:
+            json.dump(report, f)
+        mlflow.log_artifact(report_path)
+    
+    # Push metrics to XCom for downstream tasks
+    context["ti"].xcom_push(key="metrics", value=metrics)
+
+
+def persist(**context):
+    """Persist model artifacts and finalize MLflow run."""
+    # Get data from previous tasks
+    model = context["ti"].xcom_pull(key="model", task_ids="train")
+    metrics = context["ti"].xcom_pull(key="metrics", task_ids="evaluate")
+    feature_importance = context["ti"].xcom_pull(key="feature_importance", task_ids="train")
+    model_params = context["ti"].xcom_pull(key="model_params", task_ids="train")
+    training_time = context["ti"].xcom_pull(key="training_time", task_ids="train")
+    
+    # Generate data hash for lineage
+    df = context["ti"].xcom_pull(key="raw_df", task_ids="load_data")
+    data_hash = hashlib.sha256(pd.util.hash_pandas_object(df, index=True).values).hexdigest()
+    
+    # Log final metadata to MLflow
+    with mlflow.start_run() as run:
+        # Log model with MLflow's model registry
+        mlflow.sklearn.log_model(
+            sk_model=model,
+            artifact_path="model",
+            registered_model_name="telco-churn-lr"
+        )
+        
+        # Log parameters and metrics
+        mlflow.log_params(model_params)
+        mlflow.log_metrics(metrics)
+        
+        # Log feature importance if available
+        if feature_importance:
+            importance_path = "feature_importance.json"
+            with open(importance_path, "w") as f:
+                json.dump(feature_importance, f)
+            mlflow.log_artifact(importance_path)
+        
+        # Log additional metadata
+        mlflow.set_tag("data_hash", data_hash)
+        mlflow.set_tag("training_time_seconds", training_time)
+        mlflow.set_tag("model_type", model.__class__.__name__)
+        mlflow.set_tag("run_id", run.info.run_id)
+        
+        logger.info(f"Model training completed. Run ID: {run.info.run_id}")
+        logger.info(f"Model URI: runs:/{run.info.run_id}/model")
+        
+        # Save the run ID for reference
+        context["ti"].xcom_push(key="mlflow_run_id", value=run.info.run_id)
+
+
+with DAG(
+    dag_id="daily_training_pipeline",
+    schedule_interval="0 2 * * *",
+    start_date=datetime(2025, 7, 1),
+    catchup=False,
+    default_args={
+        "owner": "mlops",
+        "retries": 1,
+        "retry_delay": timedelta(minutes=5),
+    },
+    tags=["training", "automation"],
+) as dag:
+    load = PythonOperator(task_id="load_data", python_callable=load_data, provide_context=True)
+    validate = PythonOperator(task_id="validate_data", python_callable=validate_data, provide_context=True)
+    prep = PythonOperator(task_id="preprocess", python_callable=preprocess, provide_context=True)
+    split_data = PythonOperator(task_id="split", python_callable=split, provide_context=True)
+    train_task = PythonOperator(task_id="train", python_callable=train, provide_context=True)
+    eval_task = PythonOperator(task_id="evaluate", python_callable=evaluate, provide_context=True)
+    persist_task = PythonOperator(task_id="persist", python_callable=persist, provide_context=True)
+
+    # Task dependencies
+    load >> validate >> prep >> split_data >> train_task >> eval_task >> persist_task
+    
+    # Add MLflow UI URL to task documentation
+    dag.doc_md = """
+    # Telco Churn Prediction Training Pipeline
+    
+    This DAG automates the training of a churn prediction model.
+    
+    ## MLflow UI
+    Access the MLflow tracking UI at: http://localhost:5000
+    
+    ## Model Registry
+    Models are registered in MLflow and can be promoted to production via the MLflow UI.
+    """

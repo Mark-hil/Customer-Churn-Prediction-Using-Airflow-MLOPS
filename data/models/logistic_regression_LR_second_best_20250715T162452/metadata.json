@@ -1,0 +1,52 @@
+{
+  "model_name": "logistic_regression_LR_second_best",
+  "timestamp": "20250715T162452",
+  "model_type": "LogisticRegression",
+  "metrics": {
+    "accuracy": 0.7359829666430092,
+    "precision": 0.5017123287671232,
+    "recall": 0.7834224598930482,
+    "f1": 0.6116910229645094,
+    "roc_auc": 0.8419334005011754
+  },
+  "params": {
+    "C": 1.0,
+    "class_weight": "balanced",
+    "dual": false,
+    "fit_intercept": true,
+    "intercept_scaling": 1,
+    "l1_ratio": null,
+    "max_iter": 1000,
+    "multi_class": "auto",
+    "n_jobs": -1,
+    "penalty": "l2",
+    "random_state": 42,
+    "solver": "lbfgs",
+    "tol": 0.0001,
+    "verbose": 0,
+    "warm_start": false
+  },
+  "feature_importance": {
+    "customerID": 0.008754310939740625,
+    "gender": 0.21978137567161085,
+    "Partner": 0.14222082825247406,
+    "Dependents": 0.09966737655892396,
+    "PhoneService": 0.00013111869462551022,
+    "MultipleLines": 4.236369520173383e-05,
+    "InternetService": 0.00022239106507878644,
+    "OnlineSecurity": 4.890867525121497e-05,
+    "OnlineBackup": 0.02350726209923408,
+    "DeviceProtection": 0.02368074448908242,
+    "TechSupport": 0.006055994053823985,
+    "StreamingTV": 0.005882511663991657,
+    "StreamingMovies": 0.02783495769471184,
+    "Contract": 0.006055994053827384,
+    "PaperlessBilling": 0.03371746935871988,
+    "PaymentMethod": 0.1103285127170835,
+    "TotalCharges": 0.15260426607202562,
+    "SeniorCitizen": 0.04244923574475046,
+    "tenure": 0.054565142755086685,
+    "MonthlyCharges": 0.042449235744755585
+  },
+  "registered_model_name": "churn_prediction_LR_second_best"
+}

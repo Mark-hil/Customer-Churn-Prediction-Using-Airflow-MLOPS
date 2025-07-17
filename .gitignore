@@ -1,0 +1,9 @@
+docker-compose.yaml.backup
+why_the_model_selected.txt
+.env
+.env.example
+.venv
+*logs
+*.log
+*.pyc
+__pycache__

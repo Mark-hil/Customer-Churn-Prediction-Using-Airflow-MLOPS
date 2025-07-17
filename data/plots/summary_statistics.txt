@@ -1,0 +1,14 @@
+=== Dataset Summary ===
+Total samples: 7043
+Features: 21
+Numerical features: 3
+Categorical features: 17
+
+=== Missing Values ===
+Series([], )
+
+=== Target Distribution ===
+Churn
+No     73.5%
+Yes    26.5%
+Name: proportion, dtype: object
