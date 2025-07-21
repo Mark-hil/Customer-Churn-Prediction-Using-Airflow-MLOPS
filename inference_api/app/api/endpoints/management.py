@@ -1,15 +1,19 @@
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 from ...services.model_loader import ModelLoader
-from ...config import MODEL_DIR
+from ...services.ab_testing import ABTestingService
+from ...config import MODEL_DIR, API_PREFIX
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/management", tags=["Model Management"])
+router = APIRouter(prefix=f"{API_PREFIX}/management", tags=["Model Management"])
 
-# Initialize model loader
+# Initialize model loader and A/B testing service
 model_loader = ModelLoader(MODEL_DIR)
+ab_testing = ABTestingService(model_loader, traffic_split=0.5)  # Set default traffic split
+model_loader.load_models()
 
 class ModelInfoResponse(BaseModel):
     """Response model for model information."""
@@ -56,6 +60,89 @@ async def get_models():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get model info: {str(e)}"
+        )
+
+@router.get("/ab-test", response_model=Dict[str, Any])
+async def get_ab_test_info():
+    """
+    Get information about the current A/B test configuration.
+    
+    Returns:
+        Information about the A/B test configuration
+    """
+    try:
+        return model_loader.get_ab_test_info()
+    except Exception as e:
+        logger.error(f"Error getting A/B test info: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get A/B test info: {str(e)}"
+        )
+
+@router.get("/ab-test/summary", response_model=Dict[str, Any])
+async def get_ab_test_summary():
+    """
+    Get a summary of the A/B test results.
+    
+    Returns:
+        Summary of A/B test results
+    """
+    try:
+        return ab_testing.get_test_summary()
+    except Exception as e:
+        logger.error(f"Error getting A/B test summary: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get A/B test summary: {str(e)}"
+        )
+
+@router.get("/ab-test/logs", response_model=List[Dict[str, Any]])
+async def get_ab_test_logs(limit: int = 10):
+    """
+    Get recent A/B test logs.
+    
+    Args:
+        limit: Number of recent logs to return (default: 10)
+        
+    Returns:
+        List of recent A/B test logs
+    """
+    try:
+        return ab_testing.get_recent_logs(limit)
+    except Exception as e:
+        logger.error(f"Error getting A/B test logs: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get A/B test logs: {str(e)}"
+        )
+
+@router.post("/ab-test/traffic-split", response_model=Dict[str, Any])
+async def set_traffic_split(split: float = 0.5):
+    """
+    Set the traffic split for the A/B test.
+    
+    Args:
+        split: Percentage of traffic to send to the candidate model (0.0 to 1.0)
+        
+    Returns:
+        Status of the operation
+    """
+    try:
+        # Validate split value
+        if not 0 <= split <= 1:
+            raise ValueError("Split must be between 0.0 and 1.0")
+            
+        ab_testing.traffic_split = split
+        return {
+            "status": "success",
+            "message": f"Traffic split set to {split*100:.0f}% for candidate model",
+            "traffic_split": split
+        }
+    except Exception as e:
+        logger.error(f"Error setting traffic split: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to set traffic split: {str(e)}"
         )
 
 @router.post("/models/switch", response_model=Dict[str, Any])

@@ -27,9 +27,16 @@ COPY . .
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Create model directory and set permissions
+# Switch to root to create system directories
 USER root
-RUN mkdir -p /models && chown -R appuser:appuser /models
+
+# Create and set permissions for models and logs directories
+RUN mkdir -p /models && \
+    mkdir -p /app/logs && \
+    chown -R appuser:appuser /models /app/logs && \
+    chmod 755 /models /app/logs
+
+# Switch back to appuser
 USER appuser
 
 # Expose the port the app runs on

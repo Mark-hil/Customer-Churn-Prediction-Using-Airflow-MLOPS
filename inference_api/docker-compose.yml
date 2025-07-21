@@ -1,23 +1,60 @@
 version: '3.8'
 
 services:
+  # Main API service (Group A)
   inference-api:
     build: .
     container_name: churn-inference-api
-    ports:
-      - "8000:8000"
+    environment:
+      - PORT=8000
+      - MODEL_PATH=/models/model.pkl
+      - LOG_LEVEL=INFO
+      - AB_TEST_GROUP=A
     volumes:
       - ./app:/app/app
       - /home/mark-hill/airflow-quickstart/data/models:/models
-    environment:
-      - MODEL_DIR=/models
-      - DEBUG=True
-      - PORT=8000
-    restart: unless-stopped
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+    networks:
+      - app-network
+
+  # Shadow API service (Group B)
+  shadow-inference-api:
+    build: .
+    container_name: shadow-churn-inference-api
+    environment:
+      - PORT=8001
+      - MODEL_PATH=/models/shadow_model.pkl
+      - LOG_LEVEL=INFO
+      - AB_TEST_GROUP=B
+      - SHADOW_MODE=true
+    volumes:
+      - ./app:/app/app
+      - /home/mark-hill/airflow-quickstart/data/models:/models
+      - ./logs:/app/logs
+    ports:
+      - "8001:8001"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+    networks:
+      - app-network
+
+  # NGINX Load Balancer
+  nginx:
+    image: nginx:1.23-alpine
+    container_name: churn-nginx
+    ports:
+      - "8083:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - inference-api
+      - shadow-inference-api
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
