@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: 'AB Test Dashboard'
+    orgId: 1
+    folder: 'ML Monitoring'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

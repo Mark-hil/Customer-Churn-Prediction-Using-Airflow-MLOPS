@@ -1,0 +1,68 @@
+# A/B Test Monitoring Configuration
+
+monitoring:
+  # How often to check performance (in seconds)
+  check_interval_seconds: 300  # 5 minutes
+  
+  # Time window to evaluate metrics (in hours)
+  evaluation_window_hours: 24
+  
+  # Minimum number of samples required for evaluation
+  min_samples_for_evaluation: 4
+  
+  # Performance thresholds
+  performance_thresholds:
+    # Minimum accuracy required (0.0 to 1.0)
+    min_accuracy: 0.7  # 70% minimum accuracy
+    
+    # Maximum allowed drop in accuracy from baseline (0.0 to 1.0)
+    max_drop_from_baseline: 0.05  # 5% max drop
+    
+    # Maximum allowed average prediction time (in milliseconds)
+    max_prediction_time_ms: 500  # 500ms max
+    
+    # Number of consecutive failures before triggering rollback
+    consecutive_failures_before_rollback: 3
+  
+  # API endpoints
+  api_endpoints:
+    # Endpoint to get A/B test summary
+    summary: "http://localhost:8000/api/v1/management/ab-test/summary"
+    
+    # Endpoint to trigger rollback
+    rollback: "http://localhost:8000/api/v1/management/models/rollback"
+
+# Notification settings (optional)
+notifications:
+  # Email notifications
+  email:
+    enabled: false
+    smtp_server: "smtp.example.com"
+    smtp_port: 587
+    smtp_username: "user@example.com"
+    smtp_password: "your-password"
+    from_email: "monitoring@example.com"
+    to_emails:
+      - "admin@example.com"
+      - "ml-team@example.com"
+  
+  # Slack notifications
+  slack:
+    enabled: false
+    webhook_url: "https://hooks.slack.com/services/XXXXX/XXXXX/XXXXX"
+    channel: "#ml-monitoring"
+    username: "A/B Test Monitor"
+
+# Logging configuration
+logging:
+  # Log file path
+  file: "logs/ab_monitoring.log"
+  
+  # Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  level: "INFO"
+  
+  # Maximum log file size in MB before rotation
+  max_size_mb: 10
+  
+  # Number of backup logs to keep
+  backup_count: 5

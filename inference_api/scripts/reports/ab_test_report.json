@@ -1,0 +1,35 @@
+{
+  "summary": {
+    "total_requests": 94,
+    "start_time": "2025-07-29T16:06:21.264281",
+    "end_time": "2025-07-31T22:14:00.631919",
+    "group_distribution": {
+      "A": 49,
+      "B": 45
+    },
+    "requests_with_ground_truth": 51
+  },
+  "by_group": {
+    "A": {
+      "request_count": 49,
+      "predictions_with_ground_truth": 24,
+      "accuracy": 0.25,
+      "correct_predictions": 6,
+      "avg_prediction_time_ms": 179.85683557938555
+    },
+    "B": {
+      "request_count": 45,
+      "predictions_with_ground_truth": 27,
+      "accuracy": 0.18518518518518517,
+      "correct_predictions": 5,
+      "avg_prediction_time_ms": 2.4404048919677734
+    }
+  },
+  "statistical_tests": {
+    "accuracy_chi2": {
+      "p_value": 0.8253446852675054,
+      "significant": false,
+      "interpretation": "No significant difference"
+    }
+  }
+}

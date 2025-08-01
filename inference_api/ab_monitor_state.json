@@ -1,0 +1,9 @@
+{
+  "last_check": null,
+  "consecutive_failures": 0,
+  "last_rollback": null,
+  "consecutive_successes": 0,
+  "last_promotion": "2025-07-22T15:50:21.478897",
+  "current_production": "random_forest_RF_best",
+  "current_shadow": "logistic_regression_LR_second_best"
+}

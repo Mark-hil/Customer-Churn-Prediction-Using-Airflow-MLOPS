@@ -1,0 +1,35 @@
+{
+  "consecutive_successes": 3,
+  "consecutive_failures": 0,
+  "last_promotion_time": 1753286166.0989428,
+  "current_production": "random_forest_RF_best",
+  "shadow_model": "logistic_regression_LR_second_best",
+  "promotion_history": [
+    {
+      "model": "logistic_regression_LR_second_best",
+      "from_model": "random_forest_RF_best",
+      "time": "2025-07-23T15:56:06.098952",
+      "reason": "Shadow model consistently better: +50.00% over production. Consecutive successes: 3"
+    }
+  ],
+  "config": {
+    "api_url": "http://localhost:8083/api/v1/management/ab-test/summary",
+    "promotion_thresholds": {
+      "accuracy_gain_pct": 5.0,
+      "degradation_pct": 5.0,
+      "min_samples": 3,
+      "min_successes": 3,
+      "max_failures": 2,
+      "evaluation_window": 24,
+      "cooldown_minutes": 1
+    },
+    "alert_webhook": "",
+    "promotion_webhook": "",
+    "check_interval": 10
+  },
+  "metrics": {},
+  "monitoring_paused": true,
+  "previous_production": "random_forest_RF_best",
+  "production_model": "logistic_regression_LR_second_best",
+  "promotion_reason": "Shadow model consistently better: +50.00% over production. Consecutive successes: 3"
+}

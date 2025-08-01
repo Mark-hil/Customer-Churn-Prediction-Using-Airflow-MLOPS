@@ -1,0 +1,58 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    batchwait: 1s
+    batchsize: 102400
+    timeout: 10s
+
+target_config:
+  sync_period: 10s
+
+scrape_configs:
+- job_name: ab_test_jsonl_logs
+  static_configs:
+  - targets:
+      - localhost
+    labels:
+      job: ab_test_jsonl
+      __path__: /logs/ab_test_logs_jsonl/*.json
+  pipeline_stages:
+  - json:
+      # Extract fields directly from the flat JSON object
+      expressions:
+        timestamp: timestamp
+        model_type: model_type
+        request_id: request_id
+        prediction: prediction
+        ground_truth: ground_truth
+        model_version: model_version
+        model_name: model_name
+        ab_test_group: ab_test_group
+        prediction_time: prediction_time
+        interpretation: interpretation
+  - labels:
+      model_type: ""
+      ab_test_group: ""
+  - timestamp:
+      source: timestamp
+      format: RFC3339Nano
+  - output:
+      source: >-
+        {
+          "request_id": "{{ .request_id }}",
+          "model_type": "{{ .model_type }}",
+          "model_name": "{{ .model_name }}",
+          "model_version": "{{ .model_version }}",
+          "prediction": {{ .prediction | toJson }},
+          "ground_truth": {{ .ground_truth | toJson }},
+          "ab_test_group": "{{ .ab_test_group }}",
+          "prediction_time": {{ .prediction_time | toJson }},
+          "interpretation": "{{ .interpretation }}",
+          "is_correct": {{ if eq .ground_truth "" }}null{{ else }}{{ eq .prediction .ground_truth | toJson }}{{ end }}
+        }

@@ -55,14 +55,61 @@ class ABTestEvaluator:
             "groups": {}
         }
         
-        # Calculate metrics for each group
-        for group in ['A', 'B']:
-            group_data = df[df['ab_test_group'] == group]
-            metrics["groups"][group] = self._calculate_group_metrics(group_data)
+        # Add summary statistics
+        metrics["summary"] = {
+            "total_requests": len(df),
+            "requests_with_group": 0,
+            "requests_without_group": 0,
+            "group_a_requests": 0,
+            "group_b_requests": 0,
+            "other_groups": {}
+        }
+        
+        # Get all unique groups in the data (including None/NaN)
+        if not df.empty and 'ab_test_group' in df.columns:
+            # Count requests with and without groups
+            group_counts = df['ab_test_group'].value_counts(dropna=False)
             
-        # Calculate statistical significance if we have enough data
-        if not df.empty:
-            metrics["significance"] = self._calculate_significance(df)
+            # Update summary counts
+            metrics["summary"]["requests_with_group"] = int(group_counts.sum() - group_counts.get(pd.NA, 0))
+            metrics["summary"]["requests_without_group"] = int(group_counts.get(pd.NA, 0))
+            metrics["summary"]["group_a_requests"] = int(group_counts.get('A', 0))
+            metrics["summary"]["group_b_requests"] = int(group_counts.get('B', 0))
+            
+            # Track any other groups that might exist
+            other_groups = {}
+            for group, count in group_counts.items():
+                if group not in ['A', 'B', pd.NA]:
+                    other_groups[str(group)] = int(count)
+            metrics["summary"]["other_groups"] = other_groups
+            
+            # Convert all group values to strings for consistent handling
+            df['group_str'] = df['ab_test_group'].astype(str)
+            
+            # Calculate metrics for each unique group
+            for group in df['group_str'].unique():
+                group_data = df[df['group_str'] == group]
+                metrics["groups"][group] = self._calculate_group_metrics(group_data)
+            
+            # Add group distribution (including None/NaN as 'None')
+            metrics["group_distribution"] = df['group_str'].value_counts().to_dict()
+            
+            # Calculate statistical significance if we have enough data for A and B
+            if set(['A', 'B']).issubset(df['ab_test_group'].dropna().unique()):
+                metrics["significance"] = self._calculate_significance(df)
+            else:
+                metrics["significance"] = {
+                    "status": "insufficient_data",
+                    "message": f"Need both A and B groups for significance testing. Found: {df['ab_test_group'].dropna().unique().tolist()}"
+                }
+        else:
+            metrics["error"] = "No A/B test group data found in logs"
+            metrics["group_distribution"] = {}
+            metrics["requests_without_group"] = len(df)
+            metrics["significance"] = {
+                "status": "error",
+                "message": "No A/B test group data available"
+            }
             
         return metrics
         

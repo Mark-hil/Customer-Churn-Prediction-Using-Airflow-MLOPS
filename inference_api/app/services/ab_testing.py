@@ -183,48 +183,102 @@ class ABTestingService:
         self._save_logs_to_disk()
         logger.info(f"Updated ground truth for request {request_id} to {ground_truth}")
         
+    def _get_weekly_log_file(self) -> Path:
+        """
+        Get the current weekly log file path based on the current date.
+        
+        Returns:
+            Path: Path to the current weekly log file
+        """
+        current_week = datetime.now().strftime("%Y-W%U")
+        return AB_TEST_LOG_DIR / f"ab_test_logs_{current_week}.json"
+        
     def _write_log_to_disk(self, log_entry):
         """
-        Write log entry to the log file.
+        Write log entry to the log file with weekly log rotation.
         
         Args:
             log_entry: Dictionary containing the log entry
         """
-        log_path = AB_TEST_LOG_DIR / WEEKLY_LOG_FILE
-        
-        # Load existing logs if file exists
-        existing_logs = []
-        if log_path.exists():
-            try:
-                with open(log_path, 'r') as f:
-                    existing_logs = json.load(f)
-            except Exception as e:
-                logger.error(f"Error reading existing logs: {str(e)}")
-                existing_logs = []
-        
-        # Check if this is an update to an existing log entry
-        updated = False
-        for i, log in enumerate(existing_logs):
-            if log.get('request_id') == log_entry.get('request_id'):
-                # Update existing entry with new values, preserving all fields
-                existing_logs[i].update(log_entry)
-                updated = True
-                break
-        
-        if not updated:
-            # Add as new entry if not an update
-            existing_logs.append(log_entry)
-        
-        # Save all logs (not just from the current week)
-        filtered_logs = existing_logs
-        
-        # Write back the filtered logs
         try:
-            with open(weekly_log_path, 'w') as f:
-                json.dump(filtered_logs, f, indent=2)
-            logger.info(f"Updated weekly log file with {len(filtered_logs)} entries")
+            # Get the current weekly log file
+            self.log_file = self._get_weekly_log_file()
+            
+            # Ensure the log directory exists
+            self.log_file.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            
+            # Load existing logs if file exists
+            existing_logs = []
+            if self.log_file.exists():
+                try:
+                    with open(self.log_file, 'r') as f:
+                        existing_logs = json.load(f)
+                    if not isinstance(existing_logs, list):
+                        logger.warning("Log file contains invalid data, starting fresh")
+                        existing_logs = []
+                except json.JSONDecodeError as e:
+                    logger.error(f"Error decoding log file {self.log_file}: {e}")
+                    existing_logs = []
+            
+            # Add the new log entry
+            existing_logs.append(log_entry)
+            
+            # Save back to file
+            temp_file = f"{self.log_file}.tmp"
+            with open(temp_file, 'w') as f:
+                json.dump(existing_logs, f, indent=2)
+            
+            # Atomically replace the old file with the new one
+            os.replace(temp_file, self.log_file)
+            
+            # Update in-memory logs and cache
+            self.logs = existing_logs
+            if 'request_id' in log_entry:
+                self._log_cache[log_entry['request_id']] = log_entry
+                
+            logger.info(f"Updated log file {self.log_file.name} with {len(existing_logs)} entries")
+            
         except Exception as e:
-            logger.error(f"Error writing to weekly log file: {str(e)}")
+            logger.error(f"Error writing to log file: {str(e)}")
+            logger.exception("Full traceback:")
+            raise
+            
+    def log_event(self, event_type: str, details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Log an event to the A/B testing logs.
+        
+        Args:
+            event_type: Type of event (e.g., 'model_switch', 'rollback', 'error')
+            details: Dictionary containing event details
+            
+        Returns:
+            The logged event dictionary or None if logging failed
+        """
+        try:
+            # Create event with required fields
+            event = {
+                "event_id": str(uuid.uuid4()),
+                "timestamp": datetime.utcnow().isoformat(),
+                "event_type": event_type,
+                **details
+            }
+            
+            # Add to in-memory logs
+            self.logs.append(event)
+            
+            # Ensure we don't keep too many logs in memory
+            if len(self.logs) > MAX_LOG_ENTRIES:
+                self.logs = self.logs[-MAX_LOG_ENTRIES:]
+            
+            # Persist to disk
+            self._save_logs_to_disk()
+            
+            logger.info(f"Logged {event_type} event: {event}")
+            return event
+            
+        except Exception as e:
+            logger.error(f"Error logging {event_type} event: {e}", exc_info=True)
+            return None
             
     def _load_logs_from_disk(self, force_reload: bool = False) -> None:
         """Load logs from disk into memory.
@@ -233,23 +287,33 @@ class ABTestingService:
             force_reload: If True, force a reload from disk even if logs haven't changed
         """
         try:
-            if not self.log_file.exists() or self.log_file.stat().st_size == 0:
+            # Get the current weekly log file
+            current_log_file = self._get_weekly_log_file()
+            
+            # Update the instance log file reference
+            self.log_file = current_log_file
+            
+            if not current_log_file.exists() or current_log_file.stat().st_size == 0:
                 self.logs = []
                 self._log_cache = {}
                 logger.info("No existing log file found or empty file, starting with empty logs")
                 return
                 
-            with open(self.log_file, 'r') as f:
+            with open(current_log_file, 'r') as f:
                 logs = json.load(f)
                 
             # Always update the logs if forced or if they've changed
             if force_reload or logs != self.logs:
                 self.logs = logs
-                self._log_cache = {log['request_id']: log for log in self.logs if 'request_id' in log}
-                logger.info(f"Loaded {len(self.logs)} log entries from disk (force_reload={force_reload})")
+                self._log_cache = {
+                    log['request_id']: log 
+                    for log in logs 
+                    if 'request_id' in log
+                }
+                logger.info(f"Loaded {len(logs)} log entries from {current_log_file}")
                 
         except json.JSONDecodeError as e:
-            logger.error(f"Error decoding log file {self.log_file}: {e}")
+            logger.error(f"Error decoding log file {current_log_file}: {e}")
             self.logs = []
             self._log_cache = {}
         except Exception as e:
@@ -502,17 +566,97 @@ class ABTestingService:
         accuracy_improvement = (group_b_metrics['accuracy'] - group_a_metrics['accuracy'])
         prediction_time_improvement = (group_a_metrics['avg_prediction_time_ms'] - group_b_metrics['avg_prediction_time_ms'])
         
-        # Determine if B model is significantly better
-        is_significantly_better = (
-            abs(accuracy_improvement) > 2.0 or  # 2% accuracy improvement
-            abs(prediction_time_improvement) > 10.0  # 10ms prediction time improvement
-        )
+        # Configuration for recommendation
+        MIN_PREDICTIONS = 5  # Minimum number of predictions with ground truth
         
-        recommendation = "B model is better" if is_significantly_better else "No significant difference"
+        # Weights for the combined score (must sum to 1.0)
+        ACCURACY_WEIGHT = 0.7  # Higher weight on accuracy
+        TIME_WEIGHT = 0.3      # Lower weight on prediction time
         
-        return {
+        # Thresholds (as fractions of the better metric)
+        MIN_ACCURACY_IMPROVEMENT = 0.05  # 5% minimum improvement to consider
+        MIN_TIME_IMPROVEMENT = 0.2       # 20% faster to consider
+        
+        # Get metrics
+        a_accuracy = group_a_metrics['accuracy']
+        b_accuracy = group_b_metrics['accuracy']
+        a_time = group_a_metrics['avg_prediction_time_ms']
+        b_time = group_b_metrics['avg_prediction_time_ms']
+        
+        # Check minimum data requirements
+        a_has_data = group_a_metrics['predictions_with_ground_truth'] >= MIN_PREDICTIONS
+        b_has_data = group_b_metrics['predictions_with_ground_truth'] >= MIN_PREDICTIONS
+        
+        if not (a_has_data and b_has_data):
+            return {
+                "status": "insufficient_data",
+                "message": f"Not enough data for recommendation (min {MIN_PREDICTIONS} predictions with ground truth needed)",
+                "accuracy_improvement": b_accuracy - a_accuracy,
+                "prediction_time_improvement_ms": a_time - b_time,
+                "recommendation": "Insufficient data"
+            }
+        
+        # Calculate normalized scores (0 to 1, higher is better)
+        # For accuracy (simple ratio, but ensure we don't divide by zero)
+        max_accuracy = max(a_accuracy, b_accuracy, 1e-10)
+        a_accuracy_score = a_accuracy / max_accuracy
+        b_accuracy_score = b_accuracy / max_accuracy
+        
+        # For time (inverse relationship, lower is better)
+        max_time = max(a_time, b_time, 1e-10)
+        a_time_score = 1 - (a_time / max_time)  # Convert to "more is better"
+        b_time_score = 1 - (b_time / max_time)
+        
+        # Calculate combined scores
+        a_score = (a_accuracy_score * ACCURACY_WEIGHT) + (a_time_score * TIME_WEIGHT)
+        b_score = (b_accuracy_score * ACCURACY_WEIGHT) + (b_time_score * TIME_WEIGHT)
+        
+        # Calculate improvements
+        accuracy_improvement = b_accuracy - a_accuracy
+        time_improvement = a_time - b_time  # Positive means B is faster
+        
+        # Calculate relative improvements
+        rel_accuracy_improvement = (b_accuracy - a_accuracy) / max(1e-10, a_accuracy)
+        rel_time_improvement = (a_time - b_time) / max(1e-10, a_time)
+        
+        # Determine if the difference is significant
+        accuracy_significant = abs(rel_accuracy_improvement) > MIN_ACCURACY_IMPROVEMENT
+        time_significant = rel_time_improvement > MIN_TIME_IMPROVEMENT
+        
+        # Make recommendation based on combined score and significant differences
+        score_difference = b_score - a_score
+        
+        if score_difference > 0.1:  # At least 10% better overall score
+            recommendation = "B model is better"
+        elif score_difference < -0.1:  # At least 10% worse overall score
+            recommendation = "A model is better"
+        else:
+            recommendation = "No significant difference"
+        
+        # Add detailed debug information
+        debug_info = {
+            "a_accuracy": a_accuracy,
+            "b_accuracy": b_accuracy,
+            "a_time_ms": a_time,
+            "b_time_ms": b_time,
+            "a_score": a_score,
+            "b_score": b_score,
+            "score_difference": score_difference,
+            "accuracy_improvement": accuracy_improvement,
+            "time_improvement_ms": time_improvement,
+            "rel_accuracy_improvement": rel_accuracy_improvement,
+            "rel_time_improvement": rel_time_improvement,
+            "accuracy_significant": accuracy_significant,
+            "time_significant": time_significant
+        }
+        
+        # Prepare the result with all metrics
+        result = {
             "status": "success",
             "accuracy_improvement": accuracy_improvement,
             "prediction_time_improvement_ms": prediction_time_improvement,
-            "recommendation": recommendation
+            "recommendation": recommendation,
+            "debug": debug_info  # Include debug information
         }
+        
+        return result
